@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn, torch.nn.function as F
+import torch.nn as nn, torch.nn.functional as F
 
 class MHAttention(nn.Module):
     """
