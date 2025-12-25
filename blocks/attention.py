@@ -1,40 +1,38 @@
 import torch
-import torch.nn as nn
+import torch.nn as nn, torch.nn.function as F
 
-class SDPA(nn.Module):
+class MHAttention(nn.Module):
     """
-    Computes multi-head attention. Scaled Dot Product Attention
+    multi-head attention module, uses torch sdpa (scaled_dot_product_attention)
 
     Args:
-        query_embed_dim (int): Size of embedding dim for query
-        key_embed_dim (int): Size of embedding dim for key
-        value_embed_dim (int): Size of embedding dim for value
-        attn_embed_dim (int): Total embedding dim of combined heads post input projection. Each head
-            has dim attn_embed_dim // nheads
-        output_embed_dim (int): Size of embedding dim for output
-        nheads (int): Number of heads
-        dropout (float, optional): Dropout probability. Default: 0.0
-        bias (bool, optional): Whether to add bias to input projection. Default: True
+        query_embed_dim (int): size of embedding dim for query
+        key_embed_dim (int): size of embedding dim for key
+        value_embed_dim (int): size of embedding dim for value
+        attn_embed_dim (int): total embedding dim of combined heads post input projection. Each head has dim attn_embed_dim // n_heads
+        output_embed_dim (int): size of embedding dim for output
+        n_heads (int): number of heads
+        dropout (float, optional): dropout probability. Default: 0.0
+        bias (bool, optional): whether to add bias to input projection. Default: True
     """
 
     def __init__(
         self,
+        n_heads: int,
         query_embed_dim: int,
         key_embed_dim: int,
         value_embed_dim: int,
         attn_embed_dim: int,
         output_embed_dim: int,
-        nheads: int,
         dropout: float = 0.0,
-        bias=True
+        bias: bool = True
     ):
         super().__init__()
 
-        if attn_embed_dim % nheads != 0:
-            raise ValueError("attn_embed_dim must be divisible by nheads")
+        if attn_embed_dim % n_heads != 0:
+            raise ValueError("attn_embed_dim must be divisible by n_heads")
 
-        self.nheads = nheads
-        self.dropout = dropout
+        self.n_heads = nheads
         self._qkv_same_embed_dim = query_embed_dim == key_embed_dim and query_embed_dim == value_embed_dim
 
         if self._qkv_same_embed_dim:
@@ -45,7 +43,10 @@ class SDPA(nn.Module):
             self.v_proj = nn.Linear(value_embed_dim, attn_embed_dim, bias=bias)
 
         self.out_proj = nn.Linear(attn_embed_dim, output_embed_dim, bias=bias)
-        self.E_head = attn_embed_dim // nheads
+        self.attn_head_embed_dim = attn_embed_dim // n_heads
+
+
+        self.dropout = dropout
         self.bias = bias
 
     def forward(
@@ -53,8 +54,8 @@ class SDPA(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_mask=None,
-        is_causal=False,
+        attn_mask: torch.Tensor | None = None,
+        is_causal: bool = False,
     ) -> torch.Tensor:
         """
         Args:
@@ -69,8 +70,7 @@ class SDPA(nn.Module):
         """
         if self._qkv_same_embed_dim:
             if query is key and key is value:
-                result = self.packed_proj(query)
-                query, key, value = torch.chunk(result, 3, dim=-1)
+                query, key, value = torch.chunk(self.packed_proj(query), 3, dim=-1)
             else:
                 q_weight, k_weight, v_weight = torch.chunk(
                     self.packed_proj.weight, 3, dim=0
@@ -86,64 +86,25 @@ class SDPA(nn.Module):
                     F.linear(key, k_weight, k_bias),
                     F.linear(value, v_weight, v_bias),
                 )
-
         else:
             query = self.q_proj(query)
             key = self.k_proj(key)
             value = self.v_proj(value)
 
-
-        query = query.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
-        key = key.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
-        value = value.unflatten(-1, [self.nheads, self.E_head]).transpose(1, 2)
+        query = query.unflatten(-1, [self.n_heads, self.attn_head_embed_dim]).transpose(1, 2)
+        key = key.unflatten(-1, [self.n_heads, self.attn_head_embed_dim]).transpose(1, 2)
+        value = value.unflatten(-1, [self.n_heads, self.attn_head_embed_dim]).transpose(1, 2)
 
         attn_output = F.scaled_dot_product_attention(
-            query, key, value, dropout_p=self.dropout, is_causal=is_causal
+            query,
+            key,
+            value,
+            dropout_p=self.dropout,
+            attn_mask=attn_mask,
+            is_causal=is_causal
         )
 
         attn_output = attn_output.transpose(1, 2).flatten(-2)
         attn_output = self.out_proj(attn_output)
 
         return attn_output
-
-class Attention(nn.Module):
-    def __init__(
-            self,
-            attention,
-            d_model,
-            n_heads,
-            d_keys=None,
-            d_values=None
-        ):
-        super().__init__()
-
-        d_keys = d_keys or (d_model // n_heads)
-        d_values = d_values or (d_model // n_heads)
-
-        self.inner_attention = SDPA()
-        self.query_projection = nn.Linear(d_model, d_keys * n_heads)
-        self.key_projection = nn.Linear(d_model, d_keys * n_heads)
-        self.value_projection = nn.Linear(d_model, d_values * n_heads)
-        self.out_projection = nn.Linear(d_values * n_heads, d_model)
-        self.n_heads = n_heads
-
-    def forward(self, queries, keys, values, attn_mask, tau=None, delta=None):
-        B, L, _ = queries.shape
-        _, S, _ = keys.shape
-        H = self.n_heads
-
-        queries = self.query_projection(queries).view(B, L, H, -1)
-        keys = self.key_projection(keys).view(B, S, H, -1)
-        values = self.value_projection(values).view(B, S, H, -1)
-
-        out, attn = self.inner_attention(
-            queries,
-            keys,
-            values,
-            attn_mask,
-            tau=tau,
-            delta=delta
-        )
-        out = out.view(B, L, -1)
-
-        return self.out_projection(out), attn
