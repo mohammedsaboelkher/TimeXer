@@ -37,6 +37,7 @@ class PositionalEncoding(nn.Module):
                 same shape as `x`.
         """
         x = x + self.pe[:, :x.size(1)]
+
         return x
 
 class PatchEmbedding(nn.Module):
@@ -50,7 +51,6 @@ class PatchEmbedding(nn.Module):
             Must satisfy `0 <= patch_overlap < patch_len`.
         seq_len (int): Total input sequence length (timesteps).
         d_model (int): Dimension of the output embedding for each patch.
-        n_vars (int): Number of variables / channels in the input time series.
         dropout (float): Dropout probability applied to patch embeddings.
         bias (bool): Whether to use bias in the internal linear projection.
     """
@@ -60,7 +60,7 @@ class PatchEmbedding(nn.Module):
         patch_overlap: int,
         seq_len: int,
         d_model: int,
-        n_vars: int,
+        glb_token: bool = True,
         dropout: float = 0.0,
         bias: bool = True
     ):
@@ -76,7 +76,9 @@ class PatchEmbedding(nn.Module):
         self.patch_overlap = patch_overlap
         self.seq_len = seq_len
         self.d_model = d_model
-        self.n_vars = n_vars
+
+        if glb_token:
+            self.token = nn.Parameter(torch.randn(1, 1, 1, d_model))
 
         self.proj = nn.Linear(patch_len, d_model, bias=bias)
         self.positional_encoding = PositionalEncoding(d_model)
@@ -87,40 +89,34 @@ class PatchEmbedding(nn.Module):
         Create patch embeddings from the input time series.
 
         Args:
-            x (torch.Tensor): Input tensor of shape (batch, seq_len, n_vars)`
-            if n_vars passed to the constructor == 1, then it's considered univariate
-            patching is only applied to the last channel, other than n_vars == 1 it's considered multivariate and patching is applied to the whole input.
+            x (torch.Tensor): Input tensor of shape (batch, seq_len)`
 
         Returns:
             torch.Tensor: Patch embeddings with shape
-                `(batch, n_vars, n_patches, d_model)` where `n_patches` is the
-                number of patches created from the input sequence.
+                `(batch, n_patches, d_model)` where `n_patches` is the
+                number of patches created from the input sequence (including the global token if used).
         """
-        x = (x if self.n_vars > 1 else x[:, :, -1].unsqueeze(-1)).permute(0, 2, 1).unfold(
+        x = x.unfold(
             dimension=-1,
             size=self.patch_len,
             step=self.patch_len - self.patch_overlap
         )
 
-        x = x.reshape(-1, x.shape[-2], x.shape[-1])
         x = self.positional_encoding(self.proj(x))
-        x = x.reshape(-1, self.n_vars, x.shape[-2], x.shape[-1])
-        x = self.dropout(x)
 
-        return x
+        if hasattr(self, "token"):
+            batch_size = x.shape[0]
+            x = torch.cat([self.token.repeat((batch_size, 1, 1, 1)), x], dim=1)
+
+        return self.dropout(x)
 
 class VariateEmbedding(nn.Module):
     """
     Embed exogenous (variates) signals across the sequence dimension.
 
-    This module projects each variable's time series (or a combination of the
-    series and an optional `x_mark` tensor) into the `d_model` embedding
-    dimension.
-
     Args:
         seq_len (int): Length of the input sequences (timesteps).
         d_model (int): Output embedding dimensionality.
-        n_vars (int): Number of variables / channels in `x`.
         dropout (float): Dropout probability applied to embeddings.
         bias (bool): Whether to use bias in the linear projection.
     """
@@ -128,7 +124,6 @@ class VariateEmbedding(nn.Module):
         self,
         seq_len: int,
         d_model: int,
-        n_vars: int,
         dropout: float = 0.0,
         bias: bool = True
     ):
@@ -136,7 +131,6 @@ class VariateEmbedding(nn.Module):
 
         self.seq_len = seq_len
         self.d_model = d_model
-        self.n_vars = n_vars
 
         self.proj = nn.Linear(seq_len, d_model, bias=bias)
         self.dropout = nn.Dropout(dropout)
@@ -147,49 +141,15 @@ class VariateEmbedding(nn.Module):
 
         Args:
             x (torch.Tensor): Input tensor of shape `(batch, seq_len, n_vars)`
-                or `(batch, seq_len)` for univariate. The implementation
-                expects channels last and will permute to `(batch, n_vars, seq_len)`.
             x_mark (torch.Tensor | None): Optional additional features/marks
                 for each timestep (e.g., time-of-day, calendar features).
-                Expected shape `(batch, seq_len, k)` and will be permuted and
-                concatenated along the channel dimension when provided.
+                Expected shape `(batch, seq_len, k)`
 
         Returns:
             torch.Tensor: Output embeddings of shape `(batch, n_vars, d_model)`
-                (or `(batch, n_vars_combined, d_model)` if `x_mark` is used).
+                (or `(batch, n_vars + k, d_model)` if `x_mark` is used).
         """
-        x = (x if self.n_vars > 1 else x[:, :, :-1]).permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
         x = self.proj(x) if x_mark is None else self.proj(torch.cat([x, x_mark.permute(0, 2, 1)], 1))
+
         return self.dropout(x)
-
-class GlobalVariateToken(nn.Module):
-    """
-    Learnable global token(s) representing each variate (series).
-
-    This module creates a small set of learnable tokens (one per variable) and
-    repeats them for the batch dimension so they can be concatenated or used as
-    a special token in downstream transformer layers.
-
-    Args:
-        d_model (int): Dimensionality of each token embedding.
-        n_vars (int): Number of variables / tokens to maintain.
-        dropout (float): Dropout probability applied to the tokens.
-    """
-    def __init__(self, d_model: int, n_vars: int, dropout: float = 0.0):
-        super().__init__()
-
-        self.token = nn.Parameter(torch.randn(1, n_vars, 1, d_model))
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Return the batch-repeated global tokens.
-
-        Args:
-            x (torch.Tensor): Any tensor with batch dimension at `x.shape[0]`.
-
-        Returns:
-            torch.Tensor: Tokens repeated for the batch with shape
-                `(batch, n_vars, 1, d_model)`.
-        """
-        return self.dropout(self.token.repeat((x.shape[0], 1, 1, 1)))

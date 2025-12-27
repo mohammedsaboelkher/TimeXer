@@ -6,12 +6,12 @@ class MHAttention(nn.Module):
     multi-head attention module, uses torch sdpa (scaled_dot_product_attention)
 
     Args:
+        n_heads (int): number of heads
         query_embed_dim (int): size of embedding dim for query
         key_embed_dim (int): size of embedding dim for key
         value_embed_dim (int): size of embedding dim for value
         attn_embed_dim (int): total embedding dim of combined heads post input projection. Each head has dim attn_embed_dim // n_heads
         output_embed_dim (int): size of embedding dim for output
-        n_heads (int): number of heads
         dropout (float, optional): dropout probability. Default: 0.0
         bias (bool, optional): whether to add bias to input projection. Default: True
     """
@@ -66,7 +66,7 @@ class MHAttention(nn.Module):
             is_causal (bool, optional): Whether to apply causal mask. Default: False
 
         Returns:
-            attn_output (torch.Tensor): output of shape (N, L_t, query_embed_dim)
+            attn_output (torch.Tensor): output of shape (N, L_q, value_embed_dim)
         """
         if self._qkv_same_embed_dim:
             if query is key and key is value:
