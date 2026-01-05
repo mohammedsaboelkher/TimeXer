@@ -1,0 +1,12 @@
+_target_: src.data.factory.load
+
+data_path: datasets/data.csv
+timestamp: timestamp 
+target: target
+seq: 96
+overlap: 0
+horizon: 24
+freq: 1H
+train_ratio: 0.8
+test_ratio: 0.1
+batch_size: 32

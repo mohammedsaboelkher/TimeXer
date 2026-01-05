@@ -1,0 +1,13 @@
+# https://lightning.ai/docs/pytorch/stable/common/trainer.html#trainer-class-api
+
+_target_: lightning.pytorch.trainer.Trainer
+
+max_epochs: 10
+accelerator: auto
+strategy: auto
+devices: auto
+precision: 32
+logger:
+  _target_: lightning.pytorch.loggers.tensorboard.TensorBoardLogger
+  save_dir: logs
+  name: experiment

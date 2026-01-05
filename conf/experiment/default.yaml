@@ -1,0 +1,27 @@
+_target_: src.Experiment
+
+model:
+  _target_: model.TimeXer
+  n_encoder_blocks: 3
+  patch_len: 24
+  patch_overlap: 0
+  d_model: 512
+  n_heads: 8
+  d_ff: 1024
+  pred_len: 24
+  use_instance_norm: true
+  dropout: 0.1
+  bias: true
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 0.001
+  weight_decay: 0.0
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: true
+  mode: min
+  factor: 0.5
+  patience: 10

@@ -1,0 +1,5 @@
+defaults:
+  - data: default
+  - experiment: default
+  - callbacks: default
+  - trainer: default
